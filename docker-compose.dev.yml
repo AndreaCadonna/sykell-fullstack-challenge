@@ -1,0 +1,23 @@
+# Development environment overrides
+services:
+  frontend:
+    build:
+      target: development  # Use development stage
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules  # Prevent overwriting node_modules
+
+  backend:
+    build:
+      target: development  # Use development stage
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend:/app
+      - /app/tmp  # Air build cache
+
+  database:
+    ports:
+      - "3306:3306"  # Expose database port for local access

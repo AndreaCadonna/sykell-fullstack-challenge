@@ -1,0 +1,23 @@
+# Production environment overrides
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      target: production  # Use production stage
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  backend:
+    build:
+      target: production  # Use production stage
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-change-this-in-production}  # Use env variable
+
+  database:
+    restart: unless-stopped
+    # No exposed ports for security in production

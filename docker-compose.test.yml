@@ -1,0 +1,36 @@
+# Testing environment overrides
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      target: testing  # Use testing stage
+    environment:
+      - CI=true  # Set CI mode for non-interactive testing
+    command: ["npm", "run", "test:run"]  # Use Vitest run command
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+  backend:
+    build:
+      target: testing  # Use testing stage
+    environment:
+      - DB_HOST=database
+      - DB_PORT=3306
+      - DB_USER=crawler_user
+      - DB_PASSWORD=crawler_password
+      - DB_NAME=crawler_test_db  # Use test database
+      - JWT_SECRET=test-jwt-secret
+    volumes:
+      - ./backend:/app
+
+  database:
+    environment:
+      - MYSQL_DATABASE=crawler_test_db  # Test database
+    volumes:
+      - test_mysql_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+volumes:
+  test_mysql_data:
