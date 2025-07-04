@@ -15,7 +15,9 @@ COPY . .
 # Development stage
 FROM base AS development
 EXPOSE 3000
-CMD ["npm", "run", "dev"]
+ENV CHOKIDAR_USEPOLLING=true
+ENV WATCHPACK_POLLING=true
+CMD ["npm", "run", "dev", "--", "--host"]
 
 # Testing stage
 FROM base AS testing

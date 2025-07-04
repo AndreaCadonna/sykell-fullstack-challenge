@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Production builds
+frontend/dist/
+backend/tmp/
+backend/*.exe
+backend/main
+
+# Environment files
+.env
+.env.local
+.env.production.local
+.env.development.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+build-errors.log
+
+# Docker volumes
+mysql_data/
+test_mysql_data/
+
+# Test coverage
+coverage/
+*.out
+
+# Air temporary files
+tmp/
