@@ -79,8 +79,10 @@ func (cm *CrawlManager) QueueURL(urlID uint, url string) error {
 	select {
 	case cm.queue <- job:
 		log.Printf("Queued URL for crawling: ID=%d, URL=%s", urlID, url)
+		log.Printf("Queue status after queuing: length=%d, size=%d", len(cm.queue), cm.queueSize)
 		return nil
 	default:
+		log.Printf("Queue is full, cannot add URL ID=%d", urlID)
 		return fmt.Errorf("crawl queue is full (size: %d)", cm.queueSize)
 	}
 }
@@ -106,12 +108,16 @@ func (cm *CrawlManager) processQueue() {
 	log.Println("CrawlManager processor started")
 
 	for job := range cm.queue {
+		log.Printf("Received job from queue: ID=%d, URL=%s", job.URLID, job.URL)
+
 		if !cm.isRunning {
 			log.Println("CrawlManager stopping, remaining jobs will be lost")
 			break
 		}
 
+		log.Printf("About to process job: ID=%d", job.URLID)
 		cm.processSingleJob(job)
+		log.Printf("Finished processing job: ID=%d", job.URLID)
 
 		// Rate limiting: wait between jobs
 		time.Sleep(cm.crawler.config.RateLimit)

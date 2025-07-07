@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -71,6 +72,7 @@ func (h *CrawlHandler) StartCrawl(c *gin.Context) {
 
 	// Queue the URL for crawling
 	if err := h.crawlManager.QueueURL(uint(id), url.URL); err != nil {
+		log.Printf("Failed to queue URL ID=%d: %v", id, err)
 		c.JSON(http.StatusServiceUnavailable, dto.ErrorResponse(
 			"QUEUE_FULL",
 			"Crawl queue is full",
@@ -78,6 +80,8 @@ func (h *CrawlHandler) StartCrawl(c *gin.Context) {
 		))
 		return
 	}
+
+	log.Printf("Successfully queued URL ID=%d for crawling", id)
 
 	// Update URL status to queued (if not already)
 	if url.Status != models.StatusQueued {
