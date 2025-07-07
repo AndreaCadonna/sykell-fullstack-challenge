@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,12 +55,16 @@ func NewCrawlerService(config *CrawlerConfig) *CrawlerService {
 			}
 			return nil
 		},
+		// Ensure automatic decompression is enabled (it should be by default)
+		Transport: &http.Transport{
+			DisableCompression: false, // Explicitly enable compression handling
+		},
 	}
 
 	return &CrawlerService{
 		config: config,
 		client: client,
-		parser: NewHTMLParser(), // We'll implement this next
+		parser: NewHTMLParser(),
 	}
 }
 
@@ -99,6 +104,8 @@ func NewCrawlError(errorType, message, url string, err error) *CrawlError {
 func (c *CrawlerService) FetchURL(rawURL string) (*CrawlResponse, error) {
 	startTime := time.Now()
 
+	log.Printf("DEBUG: Starting to fetch URL: %s", rawURL)
+
 	// Validate URL format
 	if err := c.validateURL(rawURL); err != nil {
 		return nil, NewCrawlError("invalid_url", "Invalid URL format", rawURL, err)
@@ -110,13 +117,15 @@ func (c *CrawlerService) FetchURL(rawURL string) (*CrawlResponse, error) {
 		return nil, NewCrawlError("invalid_url", "Failed to create HTTP request", rawURL, err)
 	}
 
-	// Set headers
+	// Set headers - REMOVE Accept-Encoding to let Go handle it automatically
 	req.Header.Set("User-Agent", c.config.UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	// DON'T SET Accept-Encoding - let Go's HTTP client handle compression automatically
 	req.Header.Set("DNT", "1")
 	req.Header.Set("Connection", "keep-alive")
+
+	log.Printf("DEBUG: Making HTTP request to: %s", rawURL)
 
 	// Perform HTTP request
 	resp, err := c.client.Do(req)
@@ -124,6 +133,9 @@ func (c *CrawlerService) FetchURL(rawURL string) (*CrawlResponse, error) {
 		return nil, c.classifyNetworkError(rawURL, err)
 	}
 	defer resp.Body.Close()
+
+	log.Printf("DEBUG: Received response - Status: %d, Content-Type: %s, Content-Encoding: %s",
+		resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Encoding"))
 
 	// Check status code
 	if resp.StatusCode >= 400 {
@@ -147,6 +159,8 @@ func (c *CrawlerService) FetchURL(rawURL string) (*CrawlResponse, error) {
 	}
 
 	duration := time.Since(startTime)
+
+	log.Printf("DEBUG: Successfully fetched %d bytes in %v", len(body), duration)
 
 	return &CrawlResponse{
 		HTML:         string(body),
@@ -224,6 +238,20 @@ func (c *CrawlerService) readResponseBody(resp *http.Response, url string) ([]by
 		return nil, NewCrawlError("too_large",
 			fmt.Sprintf("Response size exceeds limit of %d bytes", c.config.MaxPageSize),
 			url, nil)
+	}
+
+	// Debug: Verify the content is readable text
+	if len(body) > 0 {
+		preview := string(body)
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		log.Printf("DEBUG: Response body preview: %s", preview)
+
+		// Check if this looks like compressed data
+		if strings.Contains(preview, "�") || len(strings.Fields(preview)) == 0 {
+			log.Printf("WARNING: Response body appears to be binary/compressed data")
+		}
 	}
 
 	return body, nil

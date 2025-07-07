@@ -1,9 +1,12 @@
 package services
 
 import (
-	"fmt"
+	"log"
 	"net/url"
+	"regexp"
 	"strings"
+
+	"golang.org/x/net/html"
 )
 
 // HTMLParser handles HTML analysis and data extraction
@@ -27,13 +30,18 @@ type ParsedData struct {
 
 // LinkInfo contains information about a discovered link
 type LinkInfo struct {
-	URL     string `json:"url"`      // The href URL
-	Text    string `json:"text"`     // Link anchor text or alt text
-	IsImage bool   `json:"is_image"` // True if this is an image link
+	URL        string `json:"url"`         // The href URL
+	Text       string `json:"text"`        // Link anchor text or alt text
+	IsImage    bool   `json:"is_image"`    // True if this is an image link
+	IsInternal bool   `json:"is_internal"` // True if internal to domain
 }
 
 // Parse analyzes HTML content and extracts all required data
-func (p *HTMLParser) Parse(html string, baseURL string) (*ParsedData, error) {
+func (p *HTMLParser) Parse(htmlContent string, baseURL string) (*ParsedData, error) {
+
+	log.Printf("DEBUG: Parsing HTML content length: %d, first 200 chars: %s",
+		len(htmlContent), htmlContent[:min(200, len(htmlContent))])
+
 	data := &ParsedData{
 		HeadingCounts: make(map[string]int),
 		InternalLinks: make([]LinkInfo, 0),
@@ -49,41 +57,188 @@ func (p *HTMLParser) Parse(html string, baseURL string) (*ParsedData, error) {
 	}
 	baseDomain := strings.ToLower(baseURLParsed.Host)
 
-	// Extract HTML version from DOCTYPE
-	if version := p.extractHTMLVersion(html); version != nil {
+	// Extract HTML version from DOCTYPE before parsing
+	if version := p.extractHTMLVersion(htmlContent); version != nil {
 		data.HTMLVersion = version
 	}
 
-	// Extract page title
-	if title := p.extractPageTitle(html); title != nil {
-		data.PageTitle = title
+	// Parse HTML document
+	doc, err := html.Parse(strings.NewReader(htmlContent))
+	if err != nil {
+		// Don't fail completely on parse errors, try to extract what we can
+		data.ParseErrors = append(data.ParseErrors, "HTML parse error: "+err.Error())
+		return data, nil
 	}
 
-	// Count heading tags
-	data.HeadingCounts = p.extractHeadingCounts(html)
-
-	// Extract and categorize links
-	internal, external := p.extractLinks(html, baseDomain)
-	data.InternalLinks = internal
-	data.ExternalLinks = external
-
-	// Detect login forms
-	data.HasLoginForm = p.detectLoginForm(html)
+	// Extract data by traversing the DOM tree
+	p.traverseNode(doc, data, baseDomain, baseURL)
 
 	return data, nil
 }
 
-// extractHTMLVersion analyzes DOCTYPE declaration to determine HTML version
-func (p *HTMLParser) extractHTMLVersion(html string) *string {
-	// Convert to lowercase for case-insensitive matching
-	htmlLower := strings.ToLower(html)
+// traverseNode recursively walks through the HTML DOM tree
+func (p *HTMLParser) traverseNode(n *html.Node, data *ParsedData, baseDomain, baseURL string) {
+	if n.Type == html.ElementNode {
+		switch strings.ToLower(n.Data) {
+		case "title":
+			if title := p.extractTextContent(n); title != "" {
+				data.PageTitle = &title
+			}
 
-	// Look for DOCTYPE declaration
-	if strings.Contains(htmlLower, "<!doctype html>") || strings.Contains(htmlLower, "<!doctype html ") {
-		version := "HTML5"
-		return &version
+		case "h1", "h2", "h3", "h4", "h5", "h6":
+			data.HeadingCounts[strings.ToLower(n.Data)]++
+
+		case "a":
+			if linkInfo := p.extractLinkInfo(n, baseDomain, baseURL); linkInfo != nil {
+				if linkInfo.IsInternal {
+					data.InternalLinks = append(data.InternalLinks, *linkInfo)
+				} else {
+					data.ExternalLinks = append(data.ExternalLinks, *linkInfo)
+				}
+			}
+
+		case "form":
+			if p.hasPasswordInput(n) {
+				data.HasLoginForm = true
+			}
+		}
 	}
 
+	// Recursively process child nodes
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		p.traverseNode(c, data, baseDomain, baseURL)
+	}
+}
+
+// extractTextContent extracts the text content from a node and its children
+func (p *HTMLParser) extractTextContent(n *html.Node) string {
+	var text strings.Builder
+
+	var extractText func(*html.Node)
+	extractText = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			text.WriteString(node.Data)
+		}
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			extractText(c)
+		}
+	}
+
+	extractText(n)
+	return strings.TrimSpace(text.String())
+}
+
+// extractLinkInfo extracts link information from an anchor tag
+func (p *HTMLParser) extractLinkInfo(n *html.Node, baseDomain, baseURL string) *LinkInfo {
+	var href string
+
+	// Find href attribute
+	for _, attr := range n.Attr {
+		if strings.ToLower(attr.Key) == "href" {
+			href = strings.TrimSpace(attr.Val)
+			break
+		}
+	}
+
+	// Skip empty or invalid hrefs
+	if href == "" || href == "#" || strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "mailto:") {
+		return nil
+	}
+
+	// Extract link text
+	linkText := p.extractTextContent(n)
+	if linkText == "" {
+		linkText = href // Fallback to URL if no text
+	}
+
+	// Resolve relative URLs
+	resolvedURL := p.resolveURL(href, baseURL)
+	if resolvedURL == "" {
+		return nil
+	}
+
+	// Determine if link is internal
+	isInternal := p.isInternalLink(resolvedURL, baseDomain)
+
+	return &LinkInfo{
+		URL:        resolvedURL,
+		Text:       linkText,
+		IsImage:    false, // Could be enhanced to detect image links
+		IsInternal: isInternal,
+	}
+}
+
+// resolveURL resolves relative URLs against the base URL
+func (p *HTMLParser) resolveURL(href, baseURL string) string {
+	// Parse base URL
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+
+	// Parse href (could be relative or absolute)
+	ref, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+
+	// Resolve relative URL
+	resolved := base.ResolveReference(ref)
+	return resolved.String()
+}
+
+// isInternalLink determines if a link is internal to the base domain
+func (p *HTMLParser) isInternalLink(linkURL, baseDomain string) bool {
+	parsedURL, err := url.Parse(linkURL)
+	if err != nil {
+		return false
+	}
+
+	linkDomain := strings.ToLower(parsedURL.Host)
+	return linkDomain == baseDomain
+}
+
+// hasPasswordInput checks if a form contains a password input
+func (p *HTMLParser) hasPasswordInput(formNode *html.Node) bool {
+	var hasPassword bool
+
+	var checkInputs func(*html.Node)
+	checkInputs = func(n *html.Node) {
+		if n.Type == html.ElementNode && strings.ToLower(n.Data) == "input" {
+			for _, attr := range n.Attr {
+				if strings.ToLower(attr.Key) == "type" && strings.ToLower(attr.Val) == "password" {
+					hasPassword = true
+					return
+				}
+			}
+		}
+
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			checkInputs(c)
+		}
+	}
+
+	checkInputs(formNode)
+	return hasPassword
+}
+
+// extractHTMLVersion analyzes DOCTYPE declaration to determine HTML version
+func (p *HTMLParser) extractHTMLVersion(htmlContent string) *string {
+	// Convert to lowercase for case-insensitive matching
+	htmlLower := strings.ToLower(htmlContent)
+
+	// Look for DOCTYPE declaration
+	doctypeRegex := regexp.MustCompile(`<!doctype\s+html[^>]*>`)
+	if doctypeRegex.MatchString(htmlLower) {
+		// Check for HTML5
+		if strings.Contains(htmlLower, "<!doctype html>") ||
+			regexp.MustCompile(`<!doctype\s+html\s*>`).MatchString(htmlLower) {
+			version := "HTML5"
+			return &version
+		}
+	}
+
+	// Check for HTML 4.01 variants
 	if strings.Contains(htmlLower, "html 4.01") {
 		if strings.Contains(htmlLower, "strict") {
 			version := "HTML4.01 Strict"
@@ -99,6 +254,7 @@ func (p *HTMLParser) extractHTMLVersion(html string) *string {
 		return &version
 	}
 
+	// Check for XHTML variants
 	if strings.Contains(htmlLower, "xhtml 1.0") {
 		if strings.Contains(htmlLower, "strict") {
 			version := "XHTML1.0 Strict"
@@ -121,219 +277,4 @@ func (p *HTMLParser) extractHTMLVersion(html string) *string {
 
 	// No recognizable DOCTYPE found
 	return nil
-}
-
-// extractPageTitle extracts the content of the <title> tag
-func (p *HTMLParser) extractPageTitle(html string) *string {
-	// Simple regex-free implementation for reliability
-	// Look for <title> tag (case insensitive)
-	htmlLower := strings.ToLower(html)
-
-	titleStart := strings.Index(htmlLower, "<title")
-	if titleStart == -1 {
-		return nil
-	}
-
-	// Find the end of the opening tag
-	titleTagEnd := strings.Index(html[titleStart:], ">")
-	if titleTagEnd == -1 {
-		return nil
-	}
-	titleTagEnd += titleStart + 1
-
-	// Find the closing tag
-	titleEnd := strings.Index(htmlLower[titleTagEnd:], "</title>")
-	if titleEnd == -1 {
-		return nil
-	}
-	titleEnd += titleTagEnd
-
-	// Extract title content
-	title := strings.TrimSpace(html[titleTagEnd:titleEnd])
-	if title == "" {
-		return nil
-	}
-
-	return &title
-}
-
-// extractHeadingCounts counts occurrences of heading tags (h1-h6)
-func (p *HTMLParser) extractHeadingCounts(html string) map[string]int {
-	counts := map[string]int{
-		"h1": 0, "h2": 0, "h3": 0, "h4": 0, "h5": 0, "h6": 0,
-	}
-
-	htmlLower := strings.ToLower(html)
-
-	for level := 1; level <= 6; level++ {
-		tag := fmt.Sprintf("<h%d", level)
-		key := fmt.Sprintf("h%d", level)
-
-		// Count opening tags
-		pos := 0
-		for {
-			index := strings.Index(htmlLower[pos:], tag)
-			if index == -1 {
-				break
-			}
-			pos += index + len(tag)
-
-			// Verify it's a complete tag (followed by space, > or other attributes)
-			if pos < len(htmlLower) {
-				nextChar := htmlLower[pos]
-				if nextChar == '>' || nextChar == ' ' || nextChar == '\t' || nextChar == '\n' {
-					counts[key]++
-				}
-			}
-		}
-	}
-
-	return counts
-}
-
-// extractLinks extracts and categorizes links as internal or external
-func (p *HTMLParser) extractLinks(html string, baseDomain string) (internal, external []LinkInfo) {
-	internal = make([]LinkInfo, 0)
-	external = make([]LinkInfo, 0)
-
-	htmlLower := strings.ToLower(html)
-
-	// Simple implementation - look for href attributes
-	pos := 0
-	for {
-		// Find next href attribute
-		hrefIndex := strings.Index(htmlLower[pos:], "href=")
-		if hrefIndex == -1 {
-			break
-		}
-		hrefIndex += pos
-
-		// Extract the URL value
-		linkURL, linkText := p.extractLinkURL(html, hrefIndex)
-		if linkURL == "" {
-			pos = hrefIndex + 5
-			continue
-		}
-
-		// Categorize as internal or external
-		if p.isInternalLink(linkURL, baseDomain) {
-			internal = append(internal, LinkInfo{
-				URL:     linkURL,
-				Text:    linkText,
-				IsImage: false,
-			})
-		} else {
-			external = append(external, LinkInfo{
-				URL:     linkURL,
-				Text:    linkText,
-				IsImage: false,
-			})
-		}
-
-		pos = hrefIndex + 5
-	}
-
-	return internal, external
-}
-
-// extractLinkURL extracts URL and text from href attribute
-func (p *HTMLParser) extractLinkURL(html string, hrefIndex int) (string, string) {
-	// This is a simplified implementation
-	// In production, you'd want proper HTML parsing
-
-	// Find the quote character after href=
-	start := hrefIndex + 5
-	if start >= len(html) {
-		return "", ""
-	}
-
-	// Skip whitespace
-	for start < len(html) && (html[start] == ' ' || html[start] == '\t') {
-		start++
-	}
-
-	if start >= len(html) {
-		return "", ""
-	}
-
-	// Check for quote character
-	quote := html[start]
-	if quote != '"' && quote != '\'' {
-		return "", ""
-	}
-
-	start++ // Skip opening quote
-
-	// Find closing quote
-	end := start
-	for end < len(html) && html[end] != quote {
-		end++
-	}
-
-	if end >= len(html) {
-		return "", ""
-	}
-
-	linkURL := html[start:end]
-
-	// Extract link text (simplified - just return URL for now)
-	linkText := linkURL
-
-	return linkURL, linkText
-}
-
-// isInternalLink determines if a link is internal to the base domain
-func (p *HTMLParser) isInternalLink(linkURL, baseDomain string) bool {
-	// Handle relative URLs
-	if strings.HasPrefix(linkURL, "/") ||
-		strings.HasPrefix(linkURL, "#") ||
-		strings.HasPrefix(linkURL, "?") ||
-		(!strings.HasPrefix(linkURL, "http://") && !strings.HasPrefix(linkURL, "https://")) {
-		return true
-	}
-
-	// Parse absolute URL
-	parsedURL, err := url.Parse(linkURL)
-	if err != nil {
-		return false
-	}
-
-	linkDomain := strings.ToLower(parsedURL.Host)
-	return linkDomain == baseDomain
-}
-
-// detectLoginForm checks if the page contains a login form
-func (p *HTMLParser) detectLoginForm(html string) bool {
-	htmlLower := strings.ToLower(html)
-
-	// Look for forms containing password inputs
-	formStart := 0
-	for {
-		formIndex := strings.Index(htmlLower[formStart:], "<form")
-		if formIndex == -1 {
-			break
-		}
-		formIndex += formStart
-
-		// Find the end of this form
-		formEnd := strings.Index(htmlLower[formIndex:], "</form>")
-		if formEnd == -1 {
-			// No closing form tag found, check rest of document
-			formEnd = len(htmlLower)
-		} else {
-			formEnd += formIndex
-		}
-
-		// Check if this form contains a password input
-		formContent := htmlLower[formIndex:formEnd]
-		if strings.Contains(formContent, "type=\"password\"") ||
-			strings.Contains(formContent, "type='password'") ||
-			strings.Contains(formContent, "type=password") {
-			return true
-		}
-
-		formStart = formEnd
-	}
-
-	return false
 }

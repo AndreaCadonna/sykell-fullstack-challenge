@@ -1,5 +1,10 @@
 -- Web Crawler Database Schema
--- Supports all test task requirements with proper indexing
+
+-- Drop tables if they exist (for clean recreation)
+DROP TABLE IF EXISTS found_links;
+DROP TABLE IF EXISTS crawl_results;
+DROP TABLE IF EXISTS api_tokens;
+DROP TABLE IF EXISTS urls;
 
 -- URLs table - stores target URLs for crawling
 CREATE TABLE urls (
@@ -39,7 +44,9 @@ CREATE TABLE crawl_results (
     crawled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     crawl_duration_ms INT NULL,
     
-    FOREIGN KEY (url_id) REFERENCES urls(id) ON DELETE CASCADE,
+    -- Foreign key with CASCADE DELETE
+    CONSTRAINT fk_crawl_results_url_id 
+        FOREIGN KEY (url_id) REFERENCES urls(id) ON DELETE CASCADE,
     INDEX idx_url_id (url_id),
     INDEX idx_crawled_at (crawled_at)
 );
@@ -57,7 +64,9 @@ CREATE TABLE found_links (
     
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
-    FOREIGN KEY (url_id) REFERENCES urls(id) ON DELETE CASCADE,
+    -- Foreign key with CASCADE DELETE
+    CONSTRAINT fk_found_links_url_id 
+        FOREIGN KEY (url_id) REFERENCES urls(id) ON DELETE CASCADE,
     INDEX idx_url_id (url_id),
     INDEX idx_is_internal (is_internal),
     INDEX idx_is_accessible (is_accessible),
@@ -82,4 +91,4 @@ CREATE TABLE api_tokens (
 -- Insert default API token for development
 -- Token: "dev-token-12345" -> SHA256 hash
 INSERT INTO api_tokens (token_hash, name) VALUES 
-('a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3', 'Development Token');
+('c743de5bf76fe257f82ab67a1057fb628cc6ab5997747548293e8e3dd9024a8a', 'Development Token');
